@@ -1,4 +1,4 @@
-# TODO 2024-10-superposition
+# 2024-10-superposition
 ---
 - Category: chose from [[protocol_categories]]
 - Note Create 2025-01-22

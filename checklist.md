@@ -10,3 +10,5 @@
 	- [[2024-10-superposition#[M-02] Tokens are pulled from users without verifying pool status contrary to requirement|[M-02] Tokens are pulled from users without verifying pool status contrary to requirement]]
 4. When checking multiple conditions that all need to be true for an operation to be safe or correct (especially in financial transactions like swaps), use && (AND) instead of || (OR).
 	1. [[2024-10-superposition#[M-03] Incorrect slippage handing in `swap_internal()`|[M-03] Incorrect slippage handing in `swap_internal()`]]
+5. Approval Reset or revoke
+	1. [[2024-08-superposition#[H-02] Unrevoked approvals allow NFT recovery by previous owner|[H-02] Unrevoked approvals allow NFT recovery by previous owner]]
