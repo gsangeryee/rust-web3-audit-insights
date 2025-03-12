@@ -12,3 +12,5 @@
 	1. [[2024-10-superposition#[M-03] Incorrect slippage handing in `swap_internal()`|[M-03] Incorrect slippage handing in `swap_internal()`]]
 5. Approval Reset or revoke
 	1. [[2024-08-superposition#[H-02] Unrevoked approvals allow NFT recovery by previous owner|[H-02] Unrevoked approvals allow NFT recovery by previous owner]]
+6. `lower tick < upper tick` in Uniswap-style liquidity pools
+	1. [[2024-08-superposition#[H-03] Missing `lower<upper` check in `mint_position`|[H-03] Missing `lower<upper` check in `mint_position`]]
