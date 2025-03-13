@@ -1,4 +1,4 @@
-# TODO 2024-08-superposition
+# 2024-08-superposition
 ---
 - Category: chose from [[protocol_categories]]
 - Note Create 2025-01-22
@@ -177,7 +177,7 @@ The vulnerability occurs because when a token is transferred to a new owner, the
 ---
 ## [H-03] Missing `lower<upper` check in `mint_position`
 ----
-- **Tags**: #invalid_validation #lower_upper #edge_case
+- **Tags**: #invalid_validation #lower_upper #edge_case #uniswap 
 - Number of finders: 17
 - Difficulty: Easy
 ---
@@ -305,8 +305,270 @@ Now, an attacker named Bob discovers the vulnerability:
     `amount = sqrt_ratio_at(30000) - sqrt_ratio_at(30000) = 0`
     
 4. Bob can now set his liquidity to any large value (like 100,000,000,000) without depositing any tokens!
-#### Impressions
-{{Your feelings about uncovering this finding.}}
+### Tools
+### Refine
+
+{{ Refine to typical issues}}
+
+---
+## [H-04] Position's owed fees should allow underflow but it reverts instead, resulting in locked funds
+----
+- **Tags**: #uniswap
+- Number of finders: 3
+- Difficulty: Medium
+---
+### Detail
+
+The math used to calculate how many fees are owed to the user does not allow underflows, but this is a necessary due to how the Uniswap logic works as fees can be negative. This impact adding/removing funds to a position, resulting in permanently locked funds due to a revert.
+### Context
+
+Similar to `Position's fee growth can revert resulting in funds permanently locked` but with a different function/root cause, both issues must be fixed separately.
+### Proof of Concept
+
+In `position.update` underflows are not allowed:
+
+```rust
+    pub fn update(
+        &mut self,
+        id: U256,
+        delta: i128,
+        fee_growth_inside_0: U256,
+        fee_growth_inside_1: U256,
+    ) -> Result<(), Error> {
+        let mut info = self.positions.setter(id);
+        let owed_fees_0 = full_math::mul_div(
+            fee_growth_inside_0
+->              .checked_sub(info.fee_growth_inside_0.get())
+                .ok_or(Error::FeeGrowthSubPos)?,
+            U256::from(info.liquidity.get()),
+            full_math::Q128,
+        )?;
+        let owed_fees_1 = full_math::mul_div(
+            fee_growth_inside_1
+->              .checked_sub(info.fee_growth_inside_1.get())
+                .ok_or(Error::FeeGrowthSubPos)?,
+            U256::from(info.liquidity.get()),
+            full_math::Q128,
+        )?;
+        let liquidity_next = liquidity_math::add_delta(info.liquidity.get().sys(), delta)?;
+
+        if delta != 0 { 
+            info.liquidity.set(U128::lib(&liquidity_next));
+        }
+        info.fee_growth_inside_0.set(fee_growth_inside_0);
+        info.fee_growth_inside_1.set(fee_growth_inside_1);
+        if !owed_fees_0.is_zero() {
+            // overflow is the user's problem, they should withdraw earlier
+            let new_fees_0 = info
+                .token_owed_0
+                .get()
+                .wrapping_add(U128::wrapping_from(owed_fees_0));
+            info.token_owed_0.set(new_fees_0);
+        }
+        if !owed_fees_1.is_zero() {
+            let new_fees_1 = info
+                .token_owed_1
+                .get()
+                .wrapping_add(U128::wrapping_from(owed_fees_1));
+            info.token_owed_1.set(new_fees_1);
+        }
+        Ok(())
+    }
+```
+
+While the original Uniswap version allows underflows:
+
+```rust
+    uint128 tokensOwed0 =
+        uint128(
+            FullMath.mulDiv(
+                feeGrowthInside0X128 - _self.feeGrowthInside0LastX128,
+                _self.liquidity,
+                FixedPoint128.Q128
+            )
+        );
+    uint128 tokensOwed1 =
+        uint128(
+            FullMath.mulDiv(
+                feeGrowthInside1X128 - _self.feeGrowthInside1LastX128,
+                _self.liquidity,
+                FixedPoint128.Q128
+            )
+        );
+```
+
+The issue is that negative fees are expected due to how the formula works. It is explained in detail in this Uniswap's issue:[Uniswap/v3-core#573](https://github.com/Uniswap/v3-core/issues/573)
+
+This function is used every time a position is updated, so it will be impossible to remove funds from it when the underflow happens because it will revert, resulting in locked funds.
+### Recommended Mitigation
+
+Consider using `-` to let Rust underflow without errors in release mode:
+
+```rust
+        let owed_fees_0 = full_math::mul_div(
+            fee_growth_inside_0
+-               .checked_sub(info.fee_growth_inside_0.get())
+-               .ok_or(Error::FeeGrowthSubPos)?,
++				- info.fee_growth_inside_0.get()
+            U256::from(info.liquidity.get()),
+            full_math::Q128,
+        )?;
+
+        let owed_fees_1 = full_math::mul_div(
+            fee_growth_inside_1
+-              .checked_sub(info.fee_growth_inside_1.get())
+-              .ok_or(Error::FeeGrowthSubPos)?,
++			   - info.fee_growth_inside_1.get()
+            U256::from(info.liquidity.get()),
+            full_math::Q128,
+        )?;
+```
+
+Alternatively, consider using `wrapping_sub`.
+### Discussion
+
+### Notes
+
+#### Notes 
+1. In Uniswap, `fee_growth_inside` can be negative.
+2. `fn checked_sub(&self, v: &Self) -> Option<Self>` Subtracts two numbers, checking for underflow. If underflow happens, `None` is returned.
+### Tools
+### Refine
+
+{{ Refine to typical issues}}
+
+## [H-05] Parameter Misordering in Fee Collection Function Causes Denial of Service and Fee Loss
+----
+- **Tags**:  #DOS #programming_error 
+- Number of finders: 7
+- Difficulty: Easy
+---
+### Impact
+
+A critical bug has been identified in the `collect_protocol_7540_F_A_9_F` function of the Seawater Automated Market Maker (AMM) protocol. This vulnerability affects the core functionality of fee collection, rendering the system unable to transfer protocol fees from liquidity pools to the Seawater Admin or any designated recipient. The bug stems from incorrect parameter handling during the invocation of the `transfer_to_addr` function, which results in a complete failure of the fee withdrawal process.
+
+The impact of this issue is severe:
+
+1. **Denial of Service (DoS)**: The system's inability to transfer protocol fees halts the entire fee collection process, effectively disabling this core feature. Without this function, the Seawater Admin cannot retrieve fees collected from liquidity pools, meaning the protocol cannot generate or distribute earnings from the token swapping activity in these pools.
+    
+2. **Financial Loss**: Since the protocol relies on fees for its economic model, this bug causes a direct financial loss. The protocol's earnings from fees generated by liquidity pools are locked and inaccessible, leading to loss of funds. Over time, the fees accumulate in the pools, but they cannot be withdrawn by the Seawater Admin or any authorized recipient.
+    
+3. **Erosion of User Trust**: Protocol participants expect proper fee collection and distribution. If this feature fails, users may lose confidence in the protocol's reliability, leading to reduced engagement or participation. For liquidity providers and investors, this issue directly affects expected returns, as fees cannot be withdrawn.
+    
+4. **Long-term Protocol Viability**: If not addressed, this bug could harm the protocol’s long-term viability. Since the protocol is unable to collect revenue from its own pools, its ability to cover operational costs or distribute rewards is compromised. This could lead to a shutdown or significant degradation of the protocol’s functionality.
+    
+
+In summary, the failure to collect protocol fees undermines the core value proposition of the AMM protocol, resulting in a loss of funds, DoS of essential functionality, and the potential collapse of the protocol’s economic model if left unresolved.
+### Proof of Concept
+
+The bug exists in the fee collection logic of the `collect_protocol_7540_F_A_9_F` function located in `lib.rs`. This function is responsible for transferring collected protocol fees (in the form of tokens) from an AMM pool to the Seawater Admin or another recipient. However, incorrect parameter handling within the `transfer_to_addr` function causes the entire process to fail.
+
+Here’s a detailed breakdown of the problematic code:
+
+```rust
+pub fn collect_protocol_7540_F_A_9_F(
+    &mut self,
+    pool: Address,
+    amount_0: u128,
+    amount_1: u128,
+    recipient: Address,
+) -> Result<(u128, u128), Revert> {
+    assert_eq_or!(
+        msg::sender(),
+        self.seawater_admin.get(),
+        Error::SeawaterAdminOnly
+    );
+    let (token_0, token_1) = self
+        .pools
+        .setter(pool)
+        .collect_protocol(amount_0, amount_1)?;
+    // Incorrect transfer logic
+    erc20::transfer_to_addr(recipient, pool, U256::from(token_0))?;
+    erc20::transfer_to_addr(recipient, FUSDC_ADDR, U256::from(token_1))?;
+    #[cfg(feature = "log-events")]
+    evm::log(events::CollectProtocolFees {
+        pool,
+        to: recipient,
+        amount0: token_0,
+        amount1: token_1,
+    });
+    // transfer tokens
+    Ok((token_0, token_1))
+}
+```
+
+#### **Problematic Code:**
+
+The issue arises in the following lines:
+
+```rust
+erc20::transfer_to_addr(recipient, pool, U256::from(token_0))?;
+erc20::transfer_to_addr(recipient, FUSDC_ADDR, U256::from(token_1))?;
+```
+
+In this block:
+
+- **`recipient`** is incorrectly passed as the token address.
+- **`pool` or `FUSDC_ADDR`** is incorrectly passed as the recipient.
+
+This order causes the `transfer_to_addr` function to fail because it expects the **first parameter** to be the token address and the **second parameter** to be the recipient address. Here's the correct signature of the `transfer_to_addr` function from `wasm_erc20.rs`:
+
+```rust
+pub fn transfer_to_addr(token: Address, recipient: Address, amount: U256) -> Result<(), Error> {
+    safe_transfer(token, recipient, amount)
+}
+```
+
+Since the parameters are passed in the wrong order, the `transfer_to_addr` function fails, leading to a complete halt of the fee transfer process. As a result, the collected fees cannot be moved from the pools to the Seawater Admin or recipient, effectively blocking the protocol’s ability to distribute or utilize these funds.
+
+#### **Steps to Reproduce the Issue**:
+
+1. Call the `collect_protocol_7540_F_A_9_F` function with a valid pool address, token amounts, and recipient address.
+2. The function will attempt to transfer the protocol fees using `erc20::transfer_to_addr`.
+3. Since the arguments are incorrectly passed (with the recipient and token address swapped), the transaction will fail, and no tokens will be transferred.
+
+#### **Failed Transaction Log**:
+
+```
+[18881] collect_protocol_7540_F_A_9_F::collect_fees()
+    ├─ [11555] erc20::transfer_to_addr(token: [recipient], pool: [token], 1)
+    │   └─ ← [Revert] 
+    └─ ← [Revert] 
+```
+
+This log highlights the issue: The `transfer_to_addr` function is attempting to use the recipient address as the token address, and the pool address as the recipient. This mismatch causes the transfer to fail, preventing the collected protocol fees from being withdrawn.
+
+### Recommended Mitigation
+
+To fix this issue, the arguments passed to the `erc20::transfer_to_addr` function need to be correctly ordered, ensuring that the token address is provided first, followed by the recipient address. This correction will allow the transfer of protocol fees from the liquidity pools to the designated recipient.
+
+#### **Corrected Code**:
+
+```rust
+erc20::transfer_to_addr(pool, recipient, U256::from(token_0))?;
+erc20::transfer_to_addr(FUSDC_ADDR, recipient, U256::from(token_1))?;
+```
+
+This update reverses the order of parameters, passing the **token address as the first parameter** and the **recipient address as the second parameter**, as expected by the `transfer_to_addr` function. By implementing this fix, the protocol will correctly transfer collected fees, ensuring that the Seawater Admin or any authorized recipient can successfully withdraw fees from the AMM pools.
+
+#### **Additional Steps to Consider**:
+
+1. **Add Unit Tests**: To prevent this issue from recurring, add specific unit tests to validate the correct behavior of the `collect_protocol_7540_F_A_9_F` function. These tests should confirm that fees can be collected and transferred without errors.
+    
+2. **Error Handling Improvements**: Consider adding more explicit error messages to the `transfer_to_addr` function to help identify issues during fee transfers. This could include checking whether the token address and recipient address are valid before proceeding with the transfer.
+    
+3. **Gas Efficiency**: After resolving this issue, it’s advisable to audit the overall gas usage of the fee collection process to ensure that no unnecessary operations are being performed during the transfer of protocol fees.
+### Discussion
+
+**0xsomeone (judge) commented:**
+
+> The Warden has identified that an incorrect order of arguments in the EIP-20 transfer calls within the `lib::collect_protocol_7540_F_A_9_F` function will cause a token transfer to be attempted with the `recipient` address as the “token” thereby failing on each invocation.
+> 
+> I believe a high severity rating is appropriate given that funds are directly lost and are irrecoverable due to an improper implementation of the protocol fee claim mechanism.
+
+### Notes
+
+#programming_error  - incorrect order of arguments
 
 ### Tools
 ### Refine
@@ -314,7 +576,6 @@ Now, an attacker named Bob discovers the vulnerability:
 {{ Refine to typical issues}}
 
 ---
-
 # Medium Risk Findings (xx)
 
 ---

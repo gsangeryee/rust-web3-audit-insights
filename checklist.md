@@ -1,3 +1,5 @@
+# Checklist
+## Common list
 1. Function signatures must match exactly between Solidity and Rust.
 	- Same parameter count
 	- Same parameter types
@@ -13,4 +15,15 @@
 5. Approval Reset or revoke
 	1. [[2024-08-superposition#[H-02] Unrevoked approvals allow NFT recovery by previous owner|[H-02] Unrevoked approvals allow NFT recovery by previous owner]]
 6. `lower tick < upper tick` in Uniswap-style liquidity pools
+	1. [[2024-08-superposition#[H-03] Missing `lower<upper` check in `mint_position`|[H-03] Missing `lower<upper` check in `mint_position`]]
+7. Programming Error
+	1. incorrect order of arguments
+		1. [[2024-08-superposition#[H-05] Parameter Misordering in Fee Collection Function Causes Denial of Service and Fee Loss]]
+	2. copy & paste
+		1. [[2024-08-superposition#[H-01] `update_emergency_council_7_D_0_C_1_C_58()` updates nft manager instead of emergency council]]
+
+## Uniswap
+1. `fee_growth_inside` can be negative.
+	1. [[2024-08-superposition#[H-04] Position's owed fees should allow underflow but it reverts instead, resulting in locked funds|[H-04] Position's owed fees should allow underflow but it reverts instead, resulting in locked funds]]
+2. `lower tick < upper tick`
 	1. [[2024-08-superposition#[H-03] Missing `lower<upper` check in `mint_position`|[H-03] Missing `lower<upper` check in `mint_position`]]
