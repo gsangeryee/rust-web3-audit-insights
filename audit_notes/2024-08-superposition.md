@@ -89,6 +89,8 @@ The contract has two distinct administrative components:
 Looks like programming error
 
 ### Tools
+
+- [[Semantic_Consistency_Principle]]
 ### Refine
 
 {{ Refine to typical issues}}
@@ -96,7 +98,7 @@ Looks like programming error
 ---
 ## [H-02] Unrevoked approvals allow NFT recovery by previous owner
 ----
-- **Tags**:  #token_transfer #approval_reset_or_revoke
+- **Tags**:  #token_transfer #approval_reset_or_revoke #semantic_consistency_principle 
 - Number of finders: 10
 - Difficulty: Easy
 ---
@@ -571,6 +573,282 @@ This update reverses the order of parameters, passing the **token address as th
 #programming_error  - incorrect order of arguments
 
 ### Tools
+### Refine
+
+{{ Refine to typical issues}}
+
+---
+## [H-06] `get_fee_growth_inside` in `tick.rs` should allow for `underflow`/`overflow` but doesn't
+----
+- **Tags**:  #under_overflow
+- Number of finders: 8
+- Difficulty: Easy
+---
+### Impact
+
+When operations need to calculate the `Superposition` position's fee growth, it uses a similar function implemented by [uniswap v3](https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/PositionValue.sol#L145-L166).
+
+However, according to this known issue : [Uniswap/v3-core#573](https://github.com/Uniswap/v3-core/issues/573). The contract implicitly relies on underflow/overflow when calculating the fee growth, if underflow is prevented, some operations that depend on fee growth will revert.
+### Proof of Concept
+
+It can be observed that the current implementation of `tick::get_fee_growth_inside` does not allow underflow/overflow to happen when calculating `fee_growth_inside_0` and `fee_growth_inside_1` because the contract used [checked math](https://docs.rs/num/latest/num/trait.CheckedSub.html) with additional overflow/underflow checks, which will `Performs subtraction that returns None instead of wrapping around on underflow`:
+
+`tick.rs`
+```rust
+pub fn get_fee_growth_inside(
+    &mut self,
+    lower_tick: i32,
+    upper_tick: i32,
+    cur_tick: i32,
+    fee_growth_global_0: &U256,
+    fee_growth_global_1: &U256,
+) -> Result<(U256, U256), Error> {
+    // the fee growth inside this tick is the total fee
+    // growth, minus the fee growth outside this tick
+    let lower = self.ticks.get(lower_tick);
+    let upper = self.ticks.get(upper_tick);
+
+    let (fee_growth_below_0, fee_growth_below_1) = if cur_tick >= lower_tick {
+        #[cfg(feature = "testing-dbg")]
+        dbg!((
+            "cur_tick >= lower_tick",
+            current_test!(),
+            lower.fee_growth_outside_0.get().to_string(),
+            lower.fee_growth_outside_1.get().to_string()
+        ));
+        (
+            lower.fee_growth_outside_0.get(),
+            lower.fee_growth_outside_1.get(),
+        )
+    } else {
+        #[cfg(feature = "testing-dbg")]
+        dbg!((
+            "cur_tick < lower_tick",
+            current_test!(),
+            fee_growth_global_0,
+            fee_growth_global_1,
+            lower.fee_growth_outside_0.get().to_string(),
+            lower.fee_growth_outside_1.get().to_string()
+        ));
+        (
+            fee_growth_global_0
+                .checked_sub(lower.fee_growth_outside_0.get())
+                .ok_or(Error::FeeGrowthSubTick)?,
+            fee_growth_global_1
+                .checked_sub(lower.fee_growth_outside_1.get())
+                .ok_or(Error::FeeGrowthSubTick)?,
+        )
+    };
+
+    let (fee_growth_above_0, fee_growth_above_1) = if cur_tick < upper_tick {
+        #[cfg(feature = "testing-dbg")]
+        dbg!((
+            "cur_tick < upper_tick",
+            current_test!(),
+            upper.fee_growth_outside_0.get().to_string(),
+            upper.fee_growth_outside_1.get().to_string()
+        ));
+        (
+            upper.fee_growth_outside_0.get(),
+            upper.fee_growth_outside_1.get(),
+      )
+    } else {
+        #[cfg(feature = "testing-dbg")]
+        dbg!((
+            "cur_tick >= upper_tick",
+            current_test!(),
+            fee_growth_global_0,
+            fee_growth_global_1,
+            upper.fee_growth_outside_0.get(),
+            upper.fee_growth_outside_1.get()
+        ));
+        (
+            fee_growth_global_0
+                .checked_sub(upper.fee_growth_outside_0.get())
+                .ok_or(Error::FeeGrowthSubTick)?,
+            fee_growth_global_1
+                .checked_sub(upper.fee_growth_outside_1.get())
+                .ok_or(Error::FeeGrowthSubTick)?,
+        )
+    };
+    #[cfg(feature = "testing-dbg")] // REMOVEME
+    {
+        if *fee_growth_global_0 < fee_growth_below_0 {
+            dbg!((
+                "fee_growth_global_0 < fee_growth_below_0",
+                current_test!(),
+                fee_growth_global_0.to_string(),
+                fee_growth_below_0.to_string()
+            ));
+        }
+        let fee_growth_global_0 = fee_growth_global_0.checked_sub(fee_growth_below_0).unwrap();
+        if fee_growth_global_0 < fee_growth_above_0 {
+            dbg!((
+                "fee_growth_global_0 < fee_growth_above_0",
+                current_test!(),
+                fee_growth_global_0.to_string(),
+                fee_growth_above_0.to_string()
+            ));
+        }
+    }
+    #[cfg(feature = "testing-dbg")]
+    dbg!((
+        "final stage checked sub below",
+        current_test!(),
+        fee_growth_global_0
+            .checked_sub(fee_growth_below_0)
+            .and_then(|x| x.checked_sub(fee_growth_above_0))
+    ));
+    Ok((
+        fee_growth_global_0
+            .checked_sub(fee_growth_below_0)
+            .and_then(|x| x.checked_sub(fee_growth_above_0))
+            .ok_or(Error::FeeGrowthSubTick)?,
+        fee_growth_global_1
+            .checked_sub(fee_growth_below_1)
+            .and_then(|x| x.checked_sub(fee_growth_above_1))
+            .ok_or(Error::FeeGrowthSubTick)?,
+    ))
+}
+```
+
+Especially the last lines where we have:
+
+`fee_growth_global_0 - fee_growth_below_0 - fee_growth_above_0`
+
+and
+
+`fee_growth_global_1 - fee_growth_below_1 - fee_growth_above_1`
+
+In case either one of the calculation underflows we will receive `Error::FeeGrowthSubTick` instead of being wrapped and continue working.
+
+Uniswap allows such underflows to happen because [`PositionLibrary`](https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/PositionValue.sol#L145-L166) works with Solidity version < 0.8. Otherwise, this will impact crucial operations that rely on this call, such as liquidation, and will revert unexpectedly. This behavior is quite often, especially for pools that use lower fees.
+
+> **NOTE:** _Furthermore, one of the Main Invariants in the **README** mentioned that - Superposition should follow the UniswapV3 math `faithfully`, which is not the case here, violating the invariant._  
+> [https://github.com/code-423n4/2024-08-superposition?tab=readme-ov-file#main-invariants](https://github.com/code-423n4/2024-08-superposition?tab=readme-ov-file#main-invariants)
+### Recommended Mitigation
+
+Use `unsafe`/`unchecked` math when calculating the fee growths.
+### Discussion
+
+### Notes
+
+#### Notes 
+like [[2024-08-superposition#[H-04] Position's owed fees should allow underflow but it reverts instead, resulting in locked funds|[H-04] Position's owed fees should allow underflow but it reverts instead, resulting in locked funds]]
+### Tools
+### Refine
+
+{{ Refine to typical issues}}
+
+---
+## [H-07]  `swapOut` functions have invalid slippage check, causing user loss of funds
+----
+- **Tags**: #error #programming_error #uniswap #semantic_consistency_principle
+- Number of finders: 2
+- Difficulty: Hard
+---
+### Impact
+
+`swapOut` functions have an invalid slippage check, causing user loss of funds.
+### Proof of Concept
+
+In `SeawaterAMM.sol`, `swapOut5E08A399` and `swapOutPermit23273373B` are intended to allow `usdc(token1) -> pool(token0)` swap with slippage check.
+
+However, both functions have incorrect slippage checks.  
+(1) We see in `swapOut5E08A399` `swapAmountOut` is used to check with `minOut`. But `swapAmountOut` is actually `usdc`(token1), Not the output token(token0). This uses an incorrect variable to check slippage.
+
+```rust
+    function swapOut5E08A399(
+        address token,
+        uint256 amountIn, //@audit-info note: this is usdc(token1)
+        uint256 minOut
+    ) external returns (int256, int256) {
+            (bool success, bytes memory data) = _getExecutorSwap().delegatecall(
+            abi.encodeCall(
+                ISeawaterExecutorSwap.swap904369BE,
+                (token, false, int256(amountIn), type(uint256).max)
+            )
+        );
+        require(success, string(data));
+        //@audit-info note: swapAmountIn <=> token0 , swapAmountOut <=> token1
+|>      (int256 swapAmountIn, int256 swapAmountOut) = abi.decode(
+            data,
+            (int256, int256)
+        );
+       //@audit This should use token0 value, not token1
+|>     require(swapAmountOut >= int256(minOut), "min out not reached!");
+       return (swapAmountIn, swapAmountOut);
+    }
+```
+
+For reference, in the swap facet, `swap_internal` called in the flow returns `Ok((amount_0, amount_1))`. This means `swapAmountOut` refers to token1, the input token amount.
+
+```rust
+//pkg/seawater/src/lib.rs
+    pub fn swap_internal(
+        pools: &mut Pools,
+        pool: Address,
+        zero_for_one: bool,
+        amount: I256,
+        price_limit_x96: U256,
+        permit2: Option<Permit2Args>,
+    ) -> Result<(I256, I256), Revert> {
+        let (amount_0, amount_1, _ending_tick) =
+            pools
+                .pools
+                .setter(pool)
+                .swap(zero_for_one, amount, price_limit_x96)?;
+...
+        Ok((amount_0, amount_1))
+```
+
+(2) `swapOutPermit23273373B` has the same erroneous slippage check.
+
+```rust
+//pkg/sol/SeawaterAMM.sol
+    function swapOutPermit23273373B(address token, uint256 amountIn, uint256 minOut, uint256 nonce, uint256 deadline, uint256 maxAmount, bytes memory sig) external returns (int256, int256) {
+...
+|>     (int256 swapAmountIn, int256 swapAmountOut) = abi.decode(data, (int256, int256));
+|>      require(swapAmountOut >= int256(minOut), "min out not reached!");
+        return (swapAmountIn, swapAmountOut);
+    }
+```
+
+Invalid slippage checks will cause users to lose funds during swaps.
+### Recommended Mitigation
+
+Consider changing into:
+
+```rust
+...
+        (int256 swapAmountOut, int256 swapAmountIn) = abi.decode(
+            data,
+            (int256, int256)
+        );
+                require(uint256(-swapAmountOut) >= minOut, "min out not reached!");
+                return (swapAmountOut, swapAmountIn);
+```
+
+### Discussion
+
+### Notes
+
+#### Notes 
+The code is checking if `swapAmountOut` is greater than or equal to `minOut`. However, `swapAmountOut` actually represents the amount of token1 (USDC) that was input to the swap, not the amount of token0 (pool tokens) that was received.
+
+The function returns a tuple of `(amount_0, amount_1)`, where:
+
+- `amount_0` is the change in token0 (the pool token)
+- `amount_1` is the change in token1 (USDC)
+
+When these values are decoded in the Solidity contract, they become:
+
+- `swapAmountIn` corresponds to `amount_0` (change in pool tokens)
+- `swapAmountOut` corresponds to `amount_1` (change in USDC)
+
+**Semantic Consistency Principle**: When handling data across different components or languages of a system, ensure that the semantic meaning of variables and their relationships are preserved throughout the entire execution flow.
+### Tools
+- [[Semantic_Consistency_Principle]]
 ### Refine
 
 {{ Refine to typical issues}}

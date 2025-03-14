@@ -11,7 +11,7 @@
 ---
 ## [H-01] `createPoolD650E2D0` will not work due to mismatch in solidity and stylus function definitions
 ----
-- **Tags**:  #context #function_parm
+- **Tags**:  #context #function_parm #semantic_consistency_principle 
 - Number of finders: 1
 - Difficulty: Easy
 ---
